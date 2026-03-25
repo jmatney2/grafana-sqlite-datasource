@@ -10,9 +10,6 @@ import (
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/instancemgmt"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
-
-	// register sqlite driver
-	_ "modernc.org/sqlite"
 )
 
 // Make sure sqliteDatasource implements required interfaces. This is important to do

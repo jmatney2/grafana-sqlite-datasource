@@ -14,7 +14,7 @@ import (
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
 	"github.com/grafana/grafana-plugin-sdk-go/data"
-	"modernc.org/sqlite"
+	sqlite3 "github.com/mattn/go-sqlite3"
 )
 
 var mockableLongToWide = data.LongToWide
@@ -266,19 +266,48 @@ func fetchData(
 		}
 	}()
 
-	if config.AttachLimit != nil && os.Getenv("GF_PLUGIN_UNSAFE_ALLOW_ATTACH_LIMIT_ABOVE_ZERO") == "true" {
+	{
+		limitVal := 0
+		if config.AttachLimit != nil && os.Getenv("GF_PLUGIN_UNSAFE_ALLOW_ATTACH_LIMIT_ABOVE_ZERO") == "true" {
+			limitVal = int(*config.AttachLimit)
+		}
 		// https://www.sqlite.org/c3ref/c_limit_attached.html#sqlitelimitattached
-		// #define SQLITE_LIMIT_ATTACHED                  7
-		_, err = sqlite.Limit(conn, 7, int(*config.AttachLimit))
-	} else {
-		_, err = sqlite.Limit(conn, 7, 0)
-	}
-	if err != nil {
-		log.DefaultLogger.Error("Could not set attach limit", "err", err)
-		return columns, err
+		// #define SQLITE_LIMIT_ATTACHED 7
+		err = conn.Raw(func(c interface{}) error {
+			sqliteConn, ok := c.(*sqlite3.SQLiteConn)
+			if !ok {
+				return fmt.Errorf("unexpected driver type: %T", c)
+			}
+			sqliteConn.SetLimit(7, limitVal)
+			return nil
+		})
+		if err != nil {
+			log.DefaultLogger.Error("Could not set attach limit", "err", err)
+			return columns, err
+		}
 	}
 
-	rows, err := conn.QueryContext(ctx, queryConfig.FinalQuery)
+	// Use PrepareContext + QueryContext rather than conn.QueryContext directly.
+	// conn.QueryContext calls mattn/go-sqlite3's query() which loops over all
+	// statements in the text; if the text ends with a trailing ";" or has
+	// commented-out SQL after the real statement, the loop encounters an empty
+	// statement, sqlite3_prepare_v2 returns SQLITE_OK with a NULL stmt, and
+	// the subsequent sqlite3_clear_bindings(NULL) segfaults.
+	// PrepareContext compiles only the first statement; stmt.QueryContext
+	// executes just that stmt without looping over the tail.
+	stmt, err := conn.PrepareContext(ctx, queryConfig.FinalQuery)
+	if err != nil {
+		log.DefaultLogger.Error(
+			"Could not prepare query", "query", queryConfig.FinalQuery, "err", err,
+		)
+		return columns, err
+	}
+	defer func() {
+		if err := stmt.Close(); err != nil {
+			log.DefaultLogger.Error("Error closing statement", "err", err)
+		}
+	}()
+	rows, err := stmt.QueryContext(ctx)
 	if err != nil {
 		log.DefaultLogger.Error(
 			"Could not execute query", "query", queryConfig.FinalQuery, "err", err,
